@@ -3,18 +3,15 @@
 #include <dirent.h>
 #include <errno.h>
 #include <string.h>
-// stat
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
-// open
 #include <fcntl.h>
-
-// malloc
 #include <stdlib.h>
+#include <assert.h>
+
 
 // portable reasons
-
 #ifdef _DIRENT_HAVE_D_TYPE
 #define HAVE_D_TYPE 1
 #else
@@ -27,6 +24,7 @@ char const* procMountAt = "/proc";
 char const* procStatAtFmt = "/proc/%d/stat";	// all stat information about process (pid, ppid, state ...)
 char const* procCmdAtFmt = "/proc/%d/cmdline";	// commandline
 
+// return 1 if is a directory, 0 if regular file, -1 otherwise
 int checkFileTypeStat(char const* filePath){
 	struct stat fstat;
 	memset(&fstat, 0, sizeof(fstat));
@@ -34,10 +32,10 @@ int checkFileTypeStat(char const* filePath){
 	if (stat(filePath,  &fstat)){
 		return -1;
 	}
-	if ((fstat.st_mode&S_IFMT) == S_IFDIR){
+	if ((fstat.st_mode&S_IFMT) == S_IFDIR){	// is directory
 	       return 1;
 	}	       
-	if ((fstat.st_mode&S_IFMT) == S_IFREG){
+	if ((fstat.st_mode&S_IFMT) == S_IFREG){	// is normal file
 	       return 0;
 	}	       
 	return -1;
@@ -47,9 +45,9 @@ int checkFileTypeStat(char const* filePath){
 int checkFileType(struct dirent* entry){
 	if (HAVE_D_TYPE){	// reused 
 		switch(entry->d_type){
-			case DT_DIR:
+			case DT_DIR:	// dir
 				return 1;
-			case DT_REG:
+			case DT_REG:	// regular file
 				return 0;
 			default:
 				return -1;
@@ -68,45 +66,54 @@ int isNumericStr(char const* s){
 	return 1;
 }
 
+// read all file content
 char* readAllFile(char const* filePath, int fillNull){
-	char* mem = NULL;
-	if (checkFileTypeStat(filePath) != 0){	// not normal file
-		return NULL;
-	}
-	int fd = open(filePath, O_RDONLY);
-	if (fd == -1){	// io errors
-		return NULL;
-	}
-	mem = (char*)malloc(BUFSIZE + 1);
-	memset(mem, 0, BUFSIZE + 1);
-
-	if (mem == NULL){
-		return NULL;
-	}
-	
+	FILE* of = NULL;
+	char* buffer = NULL;
 	int nread = 0;
-	char* p = mem;
-	int memLen = 0;
-	int nsize = BUFSIZE + 1;
-	while((nread = read(fd, p, BUFSIZE)) == BUFSIZE){
-		memLen += nread;
-		nsize += BUFSIZE;
-		mem = realloc(mem, nsize);
-		p += nread;
+	int bufLen = 0;
+
+	if (checkFileTypeStat(filePath) != 0){	// normal files only 
+		return NULL;
 	}
-	memLen += nread;
-	if (fillNull){
-		if (mem[memLen-1] == 0)	// does not count null	
-			memLen -= 1;
-		if (memLen <=0)	// empty
-			return NULL;
+	if ((of = fopen(filePath, "rb")) == NULL){	// io errors
+		return NULL;
+	}
+	buffer = (char*)malloc(BUFSIZE);
+	memset(buffer, 0, BUFSIZE);
+
+	char* tmp = NULL;
+	char* p = buffer;
+	while((nread=fread(p, 1, BUFSIZE, of)) == BUFSIZE){
+			bufLen += nread;
+			if ((tmp = realloc(buffer, bufLen + BUFSIZE)) != NULL){	// realloc fails
+				buffer = tmp;
+			} else {
+				free(buffer);
+				return NULL;
+			}
+			p = buffer + bufLen;	// next reading portion
+	}
+	if (ferror(of)){
+		return NULL;
+	}
+
+	bufLen += nread;
+	if (buffer[bufLen - 1] == '\x00'){
+		bufLen -= 1;
+	}
+	if (bufLen <= 0){	// empty
+		return NULL;
+	}
+	if (fillNull){	// replace null by whitespace
 		// command-line arguments as set of strings seperated by null
-		while(strlen(mem) != memLen){
-			mem[strlen(mem)] = ' ';
+		while(strlen(buffer) != bufLen){
+			buffer[strlen(buffer)] = ' ';
 		}
 	}
-	close(fd);
-	return mem;
+
+	fclose(of);
+	return buffer;
 }
 
 int main(int argc, char const** argv){
@@ -118,7 +125,7 @@ int main(int argc, char const** argv){
 		printf("ERROR: cannot open '%s' directory\n", procMountAt);
 		return 1;
 	}
-	
+
 	while (1){
 		errno = 0;
 		struct dirent* entry = readdir(dirp);	
@@ -132,7 +139,6 @@ int main(int argc, char const** argv){
 		}
 		// processComm
 		char const* comm = entry -> d_name;	// at most NAME_MAX
-		
 		if (comm[0] == '.' || !isNumericStr(comm) || checkFileType(entry) != 1)	// special files
 			continue;
 		// processID
@@ -140,10 +146,11 @@ int main(int argc, char const** argv){
 		// processCmd
 		sprintf(buffer, procCmdAtFmt, pid);
 		char* cmd = readAllFile(buffer, 1);
+
 		// processStat
 		sprintf(buffer, procStatAtFmt, pid);
 		char* pstat = readAllFile(buffer, 0);
-		
+
 		// parentPID
 		int ppid = -1;
 		if (pstat != NULL){
